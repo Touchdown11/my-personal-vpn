@@ -1,0 +1,27 @@
+name: velo_personal_vpn
+description: All-in-One Ultimate 100% Free Personal WireGuard VPN (Android & Windows)
+publish_to: "none"
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.3.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  # Modern Cross-Platform WireGuard Engine (Android API 35+, Windows 10/11, macOS, Linux)
+  wireguard_flutter_plus: ^1.0.9
+  # Pure-Dart Curve25519 (X25519) key generation on device
+  cryptography: ^2.7.0
+  # Pure-Dart HTTP client
+  http: ^1.2.2
+  # Cross-platform local storage (zero Windows C++ ATL build issues)
+  shared_preferences: ^2.3.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true
