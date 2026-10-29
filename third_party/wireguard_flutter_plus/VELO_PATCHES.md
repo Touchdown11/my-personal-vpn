@@ -19,3 +19,12 @@ app are kept. The upstream license is preserved in `LICENSE`.
 The Windows native sources are currently unmodified from upstream. If CI exposes
 a Windows-specific compiler issue, patch it here and document the change in this
 file rather than editing the pub cache during builds.
+
+## Packaging note
+
+The root `.gitignore` must ignore only root-level generated platform folders
+(`/android/`, `/windows/`, etc.). Unrooted patterns such as `android/` also hide
+`third_party/wireguard_flutter_plus/android` and `windows`, which causes Flutter
+CI to report a missing Android plugin main class or a missing Windows CMake
+directory. The repository includes a regression test that checks these vendored
+native files are present.

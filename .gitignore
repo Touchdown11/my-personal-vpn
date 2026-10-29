@@ -3,18 +3,20 @@
 .packages
 .pub-cache/
 .pub/
-build/
+/build/
 .flutter-plugins
 .flutter-plugins-dependencies
 pubspec.lock
 
-# Generated platform scaffolding (CI/local scripts recreate it)
-android/
-windows/
-linux/
-macos/
-ios/
-web/
+# Root-level generated platform scaffolding (CI/local scripts recreate it).
+# Keep these rooted so vendored plugin native sources remain tracked:
+# third_party/wireguard_flutter_plus/android and /windows are required.
+/android/
+/windows/
+/linux/
+/macos/
+/ios/
+/web/
 
 # IDE
 .idea/
