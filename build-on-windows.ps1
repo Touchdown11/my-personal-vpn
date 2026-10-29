@@ -26,18 +26,21 @@ if (-not (Test-Path ".\windows") -or -not (Test-Path ".\android")) {
     Copy-Item "$env:TEMP\velo_lib.bak" ".\lib" -Recurse -Force
 }
 
-$manifestPath = ".\android\app\src\main\AndroidManifest.xml"
-if (Test-Path $manifestPath) {
-    $content = Get-Content $manifestPath -Raw
-    if ($content -notmatch "android.permission.INTERNET") {
-        $content = $content -replace "(<manifest[^>]*>)", "`$1`n    <uses-permission android:name=`"android.permission.INTERNET`"/>"
-        Set-Content -Path $manifestPath -Value $content -Encoding UTF8
-        Write-Host "✅ Added INTERNET permission to AndroidManifest.xml" -ForegroundColor Green
-    }
-}
+Write-Host "🤖 Preparing Android scaffolding for the vendored WireGuard plugin..." -ForegroundColor Cyan
+dart tool/prepare_android.dart
+if ($LASTEXITCODE -ne 0) { throw "Android preparation failed." }
 
 Write-Host "📦 Downloading Flutter packages..." -ForegroundColor Cyan
 flutter pub get
+if ($LASTEXITCODE -ne 0) { throw "flutter pub get failed." }
+
+Write-Host "🔎 Analyzing Dart code..." -ForegroundColor Cyan
+flutter analyze
+if ($LASTEXITCODE -ne 0) { throw "flutter analyze failed." }
+
+Write-Host "🧪 Running regression tests..." -ForegroundColor Cyan
+flutter test
+if ($LASTEXITCODE -ne 0) { throw "flutter test failed." }
 
 Write-Host "🖥️ Building Windows Desktop App (.exe)..." -ForegroundColor Cyan
 flutter config --enable-windows-desktop

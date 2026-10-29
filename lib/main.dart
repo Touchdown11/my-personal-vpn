@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
@@ -8,6 +9,7 @@ import 'package:wireguard_flutter_plus/wireguard_flutter_plus.dart';
 import 'models/vpn_profile.dart';
 import 'services/free_warp_service.dart';
 import 'services/ping_service.dart';
+import 'services/wireguard_config.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -55,6 +57,10 @@ class _UltimateVpnHomeState extends State<UltimateVpnHome> {
   List<CustomVpnProfile> _profiles = [];
 
   // Connection & Live Telemetry
+  bool _engineReady = false;
+  String? _engineError;
+  StreamSubscription<VpnStage>? _stageSubscription;
+  StreamSubscription<Map<String, dynamic>>? _trafficSubscription;
   bool _isConnected = false;
   bool _isBusy = false;
   String _stageText = 'DISCONNECTED';
@@ -70,7 +76,7 @@ class _UltimateVpnHomeState extends State<UltimateVpnHome> {
   // Ultimate Controls
   int _udpPort = 2408; // 2408 | 500 | 4500
   DnsShieldMode _dnsMode = DnsShieldMode.gamingFastest;
-  bool _killSwitch = true;
+  bool _forceFullTunnel = true;
   final TextEditingController _excludedAppsCtrl = TextEditingController();
   String _lastBuiltConfig = '# Tap Connect or Preview to generate your WireGuard config';
 
@@ -81,15 +87,35 @@ class _UltimateVpnHomeState extends State<UltimateVpnHome> {
     _loadSavedData();
   }
 
+  @override
+  void dispose() {
+    _stageSubscription?.cancel();
+    _trafficSubscription?.cancel();
+    _excludedAppsCtrl.dispose();
+    super.dispose();
+  }
+
   Future<void> _initEngine() async {
     try {
       await _wireguard.initialize(
         interfaceName: 'wg0',
         vpnName: 'VeloVPN Personal',
       );
-    } catch (_) {}
+      _engineReady = true;
+      _engineError = null;
+    } catch (e) {
+      _engineReady = false;
+      final message = 'VPN engine initialization failed: $e';
+      _engineError = message;
+      if (mounted) {
+        setState(() => _stageText = 'ENGINE ERROR');
+        WidgetsBinding.instance.addPostFrameCallback((_) => _showError(message));
+      }
+      return;
+    }
 
-    _wireguard.vpnStageSnapshot.listen((event) {
+    await _stageSubscription?.cancel();
+    _stageSubscription = _wireguard.vpnStageSnapshot.listen((event) {
       if (!mounted) return;
       final name = event.toString().split('.').last.toLowerCase();
       setState(() {
@@ -100,9 +126,12 @@ class _UltimateVpnHomeState extends State<UltimateVpnHome> {
             name == 'reconnect';
         _stageText = name.toUpperCase();
       });
+    }, onError: (Object e) {
+      if (mounted) _showError('VPN status stream failed: $e');
     });
 
-    _wireguard.trafficSnapshot.listen((data) {
+    await _trafficSubscription?.cancel();
+    _trafficSubscription = _wireguard.trafficSnapshot.listen((data) {
       if (!mounted) return;
       setState(() {
         _downSpeed = _formatRate(data['downloadSpeed']);
@@ -114,7 +143,17 @@ class _UltimateVpnHomeState extends State<UltimateVpnHome> {
           _duration = data['duration'].toString();
         }
       });
+    }, onError: (Object e) {
+      if (mounted) _showError('VPN telemetry stream failed: $e');
     });
+  }
+
+  void _showError(String message) {
+    if (!mounted) return;
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    messenger?.showSnackBar(
+      SnackBar(backgroundColor: Colors.redAccent, content: Text(message)),
+    );
   }
 
   double _toNum(dynamic val) {
@@ -142,17 +181,22 @@ class _UltimateVpnHomeState extends State<UltimateVpnHome> {
   }
 
   Future<void> _loadSavedData() async {
-    final prefs = await SharedPreferences.getInstance();
-    final rawList = prefs.getString(_profilesPrefKey);
-    if (rawList != null) {
-      final decoded = jsonDecode(rawList) as List<dynamic>;
-      _profiles = decoded
-          .map((e) => CustomVpnProfile.fromJson(e as Map<String, dynamic>))
-          .toList();
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final rawList = prefs.getString(_profilesPrefKey);
+      if (rawList != null) {
+        final decoded = jsonDecode(rawList) as List<dynamic>;
+        _profiles = decoded
+            .map((e) => CustomVpnProfile.fromJson(e as Map<String, dynamic>))
+            .toList();
+      }
+      _excludedAppsCtrl.text = prefs.getString(_excludedAppsPrefKey) ?? '';
+    } catch (e) {
+      _profiles = [];
+      if (mounted) _showError('Saved VPN profiles could not be loaded: $e');
     }
-    _excludedAppsCtrl.text = prefs.getString(_excludedAppsPrefKey) ?? '';
     if (mounted) setState(() {});
-    _runPingTest();
+    await _runPingTest();
   }
 
   Future<void> _saveProfiles() async {
@@ -164,7 +208,7 @@ class _UltimateVpnHomeState extends State<UltimateVpnHome> {
   }
 
   Future<void> _runPingTest() async {
-    if (_isPinging) return;
+    if (_isPinging || !mounted) return;
     setState(() => _isPinging = true);
 
     String host = 'engage.cloudflareclient.com';
@@ -173,12 +217,13 @@ class _UltimateVpnHomeState extends State<UltimateVpnHome> {
       if (found.isNotEmpty) host = found.first.hostOnly;
     }
 
-    final result = await PingService.measureHost(host);
-    if (mounted) {
-      setState(() {
-        _latestPing = result;
-        _isPinging = false;
-      });
+    try {
+      final result = await PingService.measureHost(host);
+      if (mounted) setState(() => _latestPing = result);
+    } catch (e) {
+      if (mounted) _showError('Endpoint TCP probe failed: $e');
+    } finally {
+      if (mounted) setState(() => _isPinging = false);
     }
   }
 
@@ -187,7 +232,6 @@ class _UltimateVpnHomeState extends State<UltimateVpnHome> {
       final cfg = await FreeWarpService.buildFreeWarpConfig(
         udpPort: _udpPort,
         dnsMode: _dnsMode,
-        killSwitch: _killSwitch,
       );
       return ('engage.cloudflareclient.com:$_udpPort', cfg);
     }
@@ -196,17 +240,25 @@ class _UltimateVpnHomeState extends State<UltimateVpnHome> {
     final cfg = FreeWarpService.customizeImportedConfig(
       rawConf: profile.rawWgConfig,
       dnsMode: _dnsMode,
-      killSwitch: _killSwitch,
+      forceFullTunnel: _forceFullTunnel,
     );
     return (profile.endpoint, cfg);
   }
 
   Future<void> _toggleConnect() async {
+    if (_isBusy) return;
     setState(() => _isBusy = true);
     try {
       if (_isConnected) {
         await _wireguard.stopVpn();
       } else {
+        if (!_engineReady) {
+          await _initEngine();
+          if (!_engineReady) {
+            throw Exception(_engineError ?? 'VPN engine is not initialized.');
+          }
+        }
+
         final prefs = await SharedPreferences.getInstance();
         await prefs.setString(_excludedAppsPrefKey, _excludedAppsCtrl.text.trim());
 
@@ -247,8 +299,9 @@ class _UltimateVpnHomeState extends State<UltimateVpnHome> {
     final flagCtrl = TextEditingController(text: '🇺🇸');
     final confCtrl = TextEditingController();
 
-    await showDialog<void>(
-      context: context,
+    try {
+      await showDialog<void>(
+        context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: const Color(0xFF101728),
         title: const Text('Import Country WireGuard .conf'),
@@ -303,20 +356,18 @@ class _UltimateVpnHomeState extends State<UltimateVpnHome> {
           FilledButton(
             onPressed: () async {
               final raw = confCtrl.text.trim();
-              final epMatch = RegExp(r'Endpoint\s*=\s*([^\s]+)').firstMatch(raw);
-              if (!raw.contains('[Interface]') || epMatch == null) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                    content: Text('Invalid .conf: Must contain [Interface] and Endpoint = ...'),
-                  ),
-                );
+              final String endpoint;
+              try {
+                endpoint = WireGuardConfigEditor.validateAndExtractEndpoint(raw);
+              } on FormatException catch (e) {
+                _showError('Invalid .conf: ${e.message}');
                 return;
               }
               final newProfile = CustomVpnProfile(
                 id: DateTime.now().millisecondsSinceEpoch.toString(),
                 name: nameCtrl.text.trim().isEmpty ? 'Custom Country' : nameCtrl.text.trim(),
                 countryFlag: flagCtrl.text.trim().isEmpty ? '🌍' : flagCtrl.text.trim(),
-                endpoint: epMatch.group(1)!,
+                endpoint: endpoint,
                 rawWgConfig: raw,
               );
               setState(() {
@@ -332,8 +383,13 @@ class _UltimateVpnHomeState extends State<UltimateVpnHome> {
             child: const Text('Save Country'),
           ),
         ],
-      ),
-    );
+        ),
+      );
+    } finally {
+      nameCtrl.dispose();
+      flagCtrl.dispose();
+      confCtrl.dispose();
+    }
   }
 
   @override
@@ -498,7 +554,7 @@ class _UltimateVpnHomeState extends State<UltimateVpnHome> {
         // 4-Box Live Telemetry Grid
         Row(
           children: [
-            _metricTile('PING / JITTER', pingLabel, onTap: _runPingTest),
+            _metricTile('TCP PROBE', pingLabel, onTap: _runPingTest),
             const SizedBox(width: 8),
             _metricTile('DOWNLOAD', _downSpeed),
           ],
@@ -680,11 +736,14 @@ class _UltimateVpnHomeState extends State<UltimateVpnHome> {
         ),
         const SizedBox(height: 20),
         SwitchListTile(
-          title: const Text('Strict Kill Switch (0.0.0.0/0)'),
-          subtitle: const Text('Prevents unencrypted traffic leaks'),
-          value: _killSwitch,
+          title: const Text('Force full-tunnel routing'),
+          subtitle: const Text(
+            'Overrides imported profiles with IPv4 + IPv6 routes. Built-in WARP always uses full-tunnel routing. '
+            'This is not an OS-level kill switch; enable always-on/lockdown VPN in your device settings for leak protection.',
+          ),
+          value: _forceFullTunnel,
           activeColor: const Color(0xFF00E5A3),
-          onChanged: (v) => setState(() => _killSwitch = v),
+          onChanged: (v) => setState(() => _forceFullTunnel = v),
         ),
         const SizedBox(height: 12),
         TextField(
@@ -712,8 +771,11 @@ class _UltimateVpnHomeState extends State<UltimateVpnHome> {
               final (_, cfg) = await _prepareActiveTunnel();
               setState(() => _lastBuiltConfig = cfg);
               if (mounted) {
+                final message = _selectedProfileId == 'builtin_free_warp'
+                    ? 'Generated a brand-new free WARP keypair.'
+                    : 'Regenerated the free WARP identity. The selected imported profile is unchanged.';
                 ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('Generated brand-new free WireGuard keypair!')),
+                  SnackBar(content: Text(message)),
                 );
               }
             } catch (e) {
@@ -727,7 +789,7 @@ class _UltimateVpnHomeState extends State<UltimateVpnHome> {
             }
           },
           icon: const Icon(Icons.autorenew),
-          label: const Text('Regenerate Fresh Free Identity (New Keypair)'),
+          label: const Text('Regenerate Free WARP Identity (New Keypair)'),
         ),
         const SizedBox(height: 16),
         Row(

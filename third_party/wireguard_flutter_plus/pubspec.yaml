@@ -1,0 +1,31 @@
+name: wireguard_flutter_plus
+description: Vendored and patched WireGuard Flutter plugin for VeloVPN Android and Windows builds.
+version: 1.0.9+velo.1
+publish_to: none
+
+environment:
+  sdk: '>=3.3.0 <4.0.0'
+  flutter: '>=3.13.7'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  path_provider: ^2.1.5
+  plugin_platform_interface: ^2.1.8
+  process_run: ^1.3.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  plugin:
+    platforms:
+      android:
+        package: orban.group.wireguard_flutter
+        pluginClass: WireguardFlutterPlugin
+      windows:
+        pluginClass: WireguardFlutterPluginCApi
+      linux:
+        dartPluginClass: WireGuardFlutter

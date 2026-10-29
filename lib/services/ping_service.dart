@@ -13,7 +13,9 @@ class PingResult {
   });
 }
 
-/// Measures real round-trip latency & gaming jitter from your Windows PC / Android phone
+/// Measures TCP handshake latency to an endpoint, not ICMP ping or latency
+/// through the WireGuard UDP tunnel. The reported "jitter" is the max-min spread
+/// of the successful TCP probes.
 class PingService {
   static Future<PingResult> measureHost(String host) async {
     final samples = <int>[];

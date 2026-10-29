@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 import 'dart:typed_data';
@@ -5,6 +6,7 @@ import 'package:cryptography/cryptography.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/vpn_profile.dart';
+import 'wireguard_config.dart';
 
 /// 100% Free Serverless WireGuard Engine ($0 Server Cost, No Account Needed)
 class FreeWarpService {
@@ -13,14 +15,29 @@ class FreeWarpService {
   static const _v4Pref = 'velo_warp_ipv4';
   static const _v6Pref = 'velo_warp_ipv6';
   static const _peerPubPref = 'velo_warp_peer_pub';
+  static const _registrationTimeout = Duration(seconds: 20);
+
+  static Future<void>? _registrationInFlight;
 
   /// Generates RFC-7748 clamped Curve25519 WireGuard keys on-device
   /// and registers a free personal tunnel with Cloudflare's global UDP edge.
-  static Future<void> ensureRegistered({bool forceRefresh = false}) async {
+  static Future<void> ensureRegistered({bool forceRefresh = false}) {
+    final existing = _registrationInFlight;
+    if (existing != null) return existing;
+
+    final future = _register(forceRefresh: forceRefresh).whenComplete(() {
+      _registrationInFlight = null;
+    });
+    _registrationInFlight = future;
+    return future;
+  }
+
+  static Future<void> _register({required bool forceRefresh}) async {
     final prefs = await SharedPreferences.getInstance();
     if (!forceRefresh &&
         prefs.getString(_privKeyPref) != null &&
         prefs.getString(_v4Pref) != null &&
+        prefs.getString(_v6Pref) != null &&
         prefs.getString(_peerPubPref) != null) {
       return;
     }
@@ -40,45 +57,74 @@ class FreeWarpService {
     final privB64 = base64Encode(privBytes);
     final pubB64 = base64Encode(pubKey.bytes);
 
-    final res = await http.post(
-      Uri.parse('https://api.cloudflareclient.com/v0a2158/reg'),
-      headers: {
-        'Content-Type': 'application/json',
-        'CF-Client-Version': 'a-6.11-2223',
-      },
-      body: jsonEncode({
-        'key': pubB64,
-        'install_id': '',
-        'fcm_token': '',
-        'tos': DateTime.now().toUtc().toIso8601String(),
-        'model': 'VeloPersonalVPN',
-        'locale': 'en_US',
-      }),
-    );
+    final http.Response res;
+    try {
+      res = await http
+          .post(
+            Uri.parse('https://api.cloudflareclient.com/v0a2158/reg'),
+            headers: {
+              'Content-Type': 'application/json',
+              'CF-Client-Version': 'a-6.11-2223',
+            },
+            body: jsonEncode({
+              'key': pubB64,
+              'install_id': '',
+              'fcm_token': '',
+              'tos': DateTime.now().toUtc().toIso8601String(),
+              'model': 'VeloPersonalVPN',
+              'locale': 'en_US',
+            }),
+          )
+          .timeout(_registrationTimeout);
+    } on TimeoutException {
+      throw Exception('Free tunnel registration timed out. Check your internet connection and try again.');
+    }
 
     if (res.statusCode != 200) {
       throw Exception('Free tunnel registration returned HTTP ${res.statusCode}');
     }
 
-    final body = jsonDecode(res.body) as Map<String, dynamic>;
-    final cfg = body['config'] as Map<String, dynamic>;
-    final peer = (cfg['peers'] as List<dynamic>).first as Map<String, dynamic>;
-    final addrs =
-        (cfg['interface'] as Map<String, dynamic>)['addresses'] as Map<String, dynamic>;
+    final String v4;
+    final String v6;
+    final String peerPub;
+    try {
+      final body = jsonDecode(res.body) as Map<String, dynamic>;
+      final cfg = body['config'] as Map<String, dynamic>;
+      final peers = cfg['peers'] as List<dynamic>;
+      if (peers.isEmpty) {
+        throw const FormatException('Registration response contained no peers.');
+      }
+      final peer = peers.first as Map<String, dynamic>;
+      final addrs =
+          (cfg['interface'] as Map<String, dynamic>)['addresses'] as Map<String, dynamic>;
+      v4 = _requireString(addrs['v4'], 'IPv4 address');
+      v6 = _requireString(addrs['v6'], 'IPv6 address');
+      peerPub = _requireString(peer['public_key'], 'peer public key');
+    } on Object catch (e) {
+      throw Exception('Free tunnel registration returned an invalid response: $e');
+    }
 
+    // Only persist a complete, validated identity.
     await prefs.setString(_privKeyPref, privB64);
     await prefs.setString(_pubKeyPref, pubB64);
-    await prefs.setString(_v4Pref, addrs['v4'] as String);
-    await prefs.setString(_v6Pref, addrs['v6'] as String);
-    await prefs.setString(_peerPubPref, peer['public_key'] as String);
+    await prefs.setString(_v4Pref, v4);
+    await prefs.setString(_v6Pref, v6);
+    await prefs.setString(_peerPubPref, peerPub);
   }
 
-  /// Builds the WireGuard Quick Config dynamically applying user's chosen
-  /// Firewall Bypass UDP Port, DNS Ad-Blocker Mode, and Kill Switch!
+  static String _requireString(Object? value, String label) {
+    if (value is String && value.trim().isNotEmpty) return value.trim();
+    throw FormatException('Registration response is missing $label.');
+  }
+
+  /// Builds the built-in Cloudflare WARP config.
+  ///
+  /// The built-in profile always routes both IPv4 and IPv6 through the tunnel.
+  /// This is routing, not an OS-level kill switch; the UI must not claim that it
+  /// blocks traffic when the tunnel is down.
   static Future<String> buildFreeWarpConfig({
     required int udpPort,
     required DnsShieldMode dnsMode,
-    required bool killSwitch,
   }) async {
     await ensureRegistered();
     final prefs = await SharedPreferences.getInstance();
@@ -89,7 +135,6 @@ class FreeWarpService {
     final peerPub = prefs.getString(_peerPubPref)!;
 
     final dns = dnsMode.dnsServers.isNotEmpty ? dnsMode.dnsServers : '1.1.1.1, 1.0.0.1';
-    final allowedIps = killSwitch ? '0.0.0.0/0, ::/0' : '0.0.0.0/1, 128.0.0.0/1';
 
     return '''[Interface]
 PrivateKey = $priv
@@ -99,36 +144,22 @@ MTU = 1280
 
 [Peer]
 PublicKey = $peerPub
-AllowedIPs = $allowedIps
+AllowedIPs = ${WireGuardConfigEditor.fullTunnelAllowedIps}
 Endpoint = engage.cloudflareclient.com:$udpPort
 PersistentKeepalive = 20
 ''';
   }
 
-  /// Applies optional DNS AdBlocker & Kill Switch overrides to imported .conf files
+  /// Applies optional DNS and full-tunnel routing overrides to imported configs.
   static String customizeImportedConfig({
     required String rawConf,
     required DnsShieldMode dnsMode,
-    required bool killSwitch,
+    required bool forceFullTunnel,
   }) {
-    var updated = rawConf;
-
-    if (dnsMode != DnsShieldMode.keepProfileDefault && dnsMode.dnsServers.isNotEmpty) {
-      if (RegExp(r'^DNS\s*=', multiLine: true).hasMatch(updated)) {
-        updated = updated.replaceFirst(
-          RegExp(r'^DNS\s*=.*$', multiLine: true),
-          'DNS = ${dnsMode.dnsServers}',
-        );
-      }
-    }
-
-    if (!killSwitch) {
-      updated = updated.replaceFirst(
-        RegExp(r'^AllowedIPs\s*=.*$', multiLine: true),
-        'AllowedIPs = 0.0.0.0/1, 128.0.0.0/1',
-      );
-    }
-
-    return updated;
+    return WireGuardConfigEditor.customizeImported(
+      rawConf: rawConf,
+      dnsServers: dnsMode == DnsShieldMode.keepProfileDefault ? null : dnsMode.dnsServers,
+      forceFullTunnel: forceFullTunnel,
+    );
   }
 }
