@@ -1,86 +1,38 @@
-name: Build Free Personal VPN (Android APK + Windows EXE)
-
 on:
   push:
-    branches: [ main, master ]
+    branches: [ main, master, 'arena/**' ]
   workflow_dispatch: # Lets you click "Run workflow" manually anytime on GitHub!
 
 jobs:
-  build-android-apk:
-    name: 📱 Build Android APK (Free)
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Java 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'temurin'
-          java-version: '17'
-
-      - name: Set up Flutter Stable
         uses: subosito/flutter-action@v2
         with:
           channel: 'stable'
+          flutter-version: '3.38.10'
+
+      - name: Verify vendored Android plugin sources
+        run: test -f third_party/wireguard_flutter_plus/android/src/main/kotlin/orban/group/wireguard_flutter/WireguardFlutterPlugin.kt
 
       - name: Generate Android platform scaffolding & preserve app code
         run: |
-          cp pubspec.yaml /tmp/pubspec.yaml.bak
-          cp -r lib /tmp/lib.bak
-          flutter create . --platforms=android --org com.personal.velovpn --project-name velo_personal_vpn
           cp /tmp/pubspec.yaml.bak pubspec.yaml
           rm -rf lib && cp -r /tmp/lib.bak lib
 
-      - name: Ensure Android Release INTERNET permission
-        run: |
-          MANIFEST="android/app/src/main/AndroidManifest.xml"
-          if ! grep -q "android.permission.INTERNET" "$MANIFEST"; then
-            sed -i 's/<manifest[^>]*>/&\n    <uses-permission android:name="android.permission.INTERNET"\/>/' "$MANIFEST"
-          fi
+      - name: Prepare Android desugaring and INTERNET permission
+        run: dart tool/prepare_android.dart
 
       - name: Install Dart & Flutter dependencies
         run: flutter pub get
-
-      - name: Compile Release Android APK
-        run: flutter build apk --release --no-tree-shake-icons
-
-      - name: Upload Ready-to-Install Android APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: VeloVPN-Personal-Android-APK
-          path: build/app/outputs/flutter-apk/app-release.apk
-
-  build-windows-exe:
-    name: 🖥️ Build Windows Desktop EXE (Free)
-    runs-on: windows-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Flutter Stable
         uses: subosito/flutter-action@v2
         with:
           channel: 'stable'
+          flutter-version: '3.38.10'
+
+      - name: Verify vendored Windows plugin sources
+        shell: pwsh
+        run: |
+          if (-not (Test-Path 'third_party/wireguard_flutter_plus/windows/CMakeLists.txt')) {
+            throw 'Vendored Windows plugin sources are missing from the checkout.'
+          }
 
       - name: Generate Windows platform scaffolding & preserve app code
         shell: pwsh
-        run: |
-          Copy-Item pubspec.yaml "$env:TEMP\pubspec.yaml.bak" -Force
-          Copy-Item lib "$env:TEMP\lib.bak" -Recurse -Force
-          flutter create . --platforms=windows --org com.personal.velovpn --project-name velo_personal_vpn
-          Copy-Item "$env:TEMP\pubspec.yaml.bak" pubspec.yaml -Force
-          Remove-Item lib -Recurse -Force
-          Copy-Item "$env:TEMP\lib.bak" lib -Recurse -Force
-
-      - name: Install Dart & Flutter dependencies
-        run: flutter pub get
-
-      - name: Compile Release Windows Desktop App (.exe)
-        run: flutter build windows --release --no-tree-shake-icons
-
-      - name: Upload Ready-to-Run Windows App Folder
-        uses: actions/upload-artifact@v4
-        with:
-          name: VeloVPN-Personal-Windows-EXE
-          path: build/windows/x64/runner/Release/
