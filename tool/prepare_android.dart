@@ -6,6 +6,19 @@ import 'dart:io';
 /// `flutter pub get` / `flutter build apk`. The script is idempotent.
 void main(List<String> args) {
   final root = args.isEmpty ? Directory.current.path : args.first;
+  final pluginClass = File(
+    '$root/third_party/wireguard_flutter_plus/android/src/main/kotlin/'
+    'orban/group/wireguard_flutter/WireguardFlutterPlugin.kt',
+  );
+  if (!pluginClass.existsSync()) {
+    stderr.writeln(
+      'Vendored WireGuard Android plugin class is missing: ${pluginClass.path}. '
+      'Check that third_party/wireguard_flutter_plus/android is tracked by Git.',
+    );
+    exitCode = 1;
+    return;
+  }
+
   final appDir = Directory('$root/android/app');
   if (!appDir.existsSync()) {
     stderr.writeln('Android scaffolding is missing. Run flutter create first.');
